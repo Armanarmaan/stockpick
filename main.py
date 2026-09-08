@@ -1,13 +1,18 @@
 import os
+import matplotlib.pyplot as plt
+import mplfinance as mpf
 import pandas as pd
 import requests
 import yfinance as yf
 
-# Ambil Token & Chat ID dari Environment Variables Cloud
+# Environment Variables dari Cloud / Local
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Daftar Saham Likuid IHSG (Bisa lo tambah/kurangi sesuai selera)
+# Porsi modal per saham (Rp 1.500.000)
+CAPITAL_PER_POSITION = 1500000
+
+# Watchlist Saham Likuid IHSG
 WATCHLIST = [
     "BBCA.JK",
     "BBRI.JK",
@@ -31,13 +36,10 @@ WATCHLIST = [
     "AKRA.JK",
 ]
 
-CAPITAL_PER_POSITION = 1500000  # Porsi modal Rp 1.500.000 per saham
 
-
-def send_telegram(message):
-    """Kirim pesan hasil screening ke Telegram."""
+def send_telegram_text(message):
+    """Kirim pesan teks biasa ke Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram Token/Chat ID belum di-set. Menampilkan pesan di console:")
         print(message)
         return
 
@@ -50,28 +52,107 @@ def send_telegram(message):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Gagal mengirim pesan ke Telegram: {e}")
+        print(f"Gagal mengirim teks ke Telegram: {e}")
+
+
+def send_telegram_photo(image_path, caption):
+    """Kirim file gambar chart beserta caption ke Telegram."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(caption)
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        with open(image_path, "rb") as photo:
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption,
+                "parse_mode": "Markdown",
+            }
+            files = {"photo": photo}
+            requests.post(url, data=payload, files=files, timeout=20)
+    except Exception as e:
+        print(f"Gagal mengirim foto ke Telegram: {e}")
+
+
+def calculate_atr(df, period=14):
+    """Menghitung Average True Range (ATR)."""
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
+
+
+def calculate_rsi(series, period=14):
+    """Menghitung Relative Strength Index (RSI) dengan Wilder's Smoothing."""
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -1 * delta.clip(upper=0)
+
+    ema_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    ema_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = ema_gain / ema_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 
 def check_ihsg_trend():
-    """Modifikasi Filter Pasar: IHSG harus di atas MA50 (Uptrend)."""
+    """Memeriksa apakah IHSG berada di atas MA50 (Filter Pasar Bullish)."""
     try:
         df = yf.download("^JKSE", period="100d", interval="1d", progress=False)
         if df.empty:
-            return False
+            return True
 
-        close = df["Close"]["^JKSE"] if isinstance(df.columns, pd.MultiIndex) else df["Close"]
+        close = (
+            df["Close"]["^JKSE"]
+            if isinstance(df.columns, pd.MultiIndex)
+            else df["Close"]
+        )
         ma50 = close.rolling(window=50).mean()
 
         return float(close.iloc[-1]) > float(ma50.iloc[-1])
     except Exception as e:
         print(f"Error checking IHSG: {e}")
-        return True  # Fallback ke True jika data IHSG error
+        return True
+
+
+def generate_chart(df, ticker):
+    """Membuat gambar chart candlestick 50 hari terakhir beserta garis EMA20 & EMA50."""
+    ticker_clean = ticker.replace(".JK", "")
+    df_chart = df.tail(50).copy()
+
+    close = df_chart["Close"]
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+
+    add_plots = [
+        mpf.make_addplot(ema20, color="blue", width=1.2),
+        mpf.make_addplot(ema50, color="orange", width=1.2),
+    ]
+
+    filename = f"{ticker_clean}_chart.png"
+    mpf.plot(
+        df_chart,
+        type="candle",
+        style="yahoo",
+        volume=True,
+        addplot=add_plots,
+        title=f"{ticker_clean} - Daily (Blue: EMA20, Orange: EMA50)",
+        savefig=filename,
+    )
+    return filename
 
 
 def screen_stocks():
-    """Screening saham berbasis EMA20/EMA50 + Volume Breakout."""
-    signals = []
+    """Screening saham berbasis EMA, Volume Breakout, ATR, dan RSI Filter."""
+    signals_count = 0
 
     for ticker in WATCHLIST:
         try:
@@ -81,48 +162,99 @@ def screen_stocks():
             if df.empty or len(df) < 50:
                 continue
 
-            close = df["Close"][ticker] if isinstance(df.columns, pd.MultiIndex) else df["Close"]
-            volume = df["Volume"][ticker] if isinstance(df.columns, pd.MultiIndex) else df["Volume"]
+            close = (
+                df["Close"][ticker]
+                if isinstance(df.columns, pd.MultiIndex)
+                else df["Close"]
+            )
+            high = (
+                df["High"][ticker]
+                if isinstance(df.columns, pd.MultiIndex)
+                else df["High"]
+            )
+            low = (
+                df["Low"][ticker]
+                if isinstance(df.columns, pd.MultiIndex)
+                else df["Low"]
+            )
+            volume = (
+                df["Volume"][ticker]
+                if isinstance(df.columns, pd.MultiIndex)
+                else df["Volume"]
+            )
 
+            df_clean = pd.DataFrame(
+                {"High": high, "Low": low, "Close": close, "Volume": volume}
+            )
+
+            # Indicator Calculations
             ema20 = close.ewm(span=20, adjust=False).mean()
             ema50 = close.ewm(span=50, adjust=False).mean()
             vol_avg20 = volume.rolling(window=20).mean()
+            atr = calculate_atr(df_clean, period=14)
+            rsi = calculate_rsi(close, period=14)
 
             last_close = float(close.iloc[-1])
             last_ema20 = float(ema20.iloc[-1])
             last_ema50 = float(ema50.iloc[-1])
             last_vol = float(volume.iloc[-1])
             last_vol_avg = float(vol_avg20.iloc[-1])
+            last_atr = float(atr.iloc[-1])
+            last_rsi = float(rsi.iloc[-1])
 
-            # Syarat 1: Uptrend (Close > EMA20 > EMA50)
+            # Syarat Technical:
+            # 1. Uptrend (Close > EMA20 > EMA50)
+            # 2. Volume Spike (> Rata-rata 20 Hari)
+            # 3. RSI < 70 (Belum Overbought / Belum Pucuk)
             cond_uptrend = (last_close > last_ema20) and (
                 last_ema20 > last_ema50
             )
-            # Syarat 2: Volume > Volume rata-rata 20 hari
             cond_volume = last_vol > last_vol_avg
+            cond_rsi = last_rsi < 70
 
-            if cond_uptrend and cond_volume:
-                target_price = round(last_close * 1.08)  # Target Profit +8%
-                stop_loss = round(last_close * 0.96)  # Stop Loss -4%
+            if cond_uptrend and cond_volume and cond_rsi:
+                signals_count += 1
+                ticker_clean = ticker.replace(".JK", "")
 
-                # Kalkulasi Lot (1 Lot = 100 lembar)
+                # ATR Dynamic Calculation
+                stop_loss = round(last_close - (1.5 * last_atr))
+                target_price = round(last_close + (3.0 * last_atr))
+
+                # Hitung Lot
                 price_per_lot = last_close * 100
                 lots = max(1, int(CAPITAL_PER_POSITION // price_per_lot))
                 investment_amt = lots * price_per_lot
 
-                signals.append({
-                    "symbol": ticker.replace(".JK", ""),
-                    "close": last_close,
-                    "target": target_price,
-                    "sl": stop_loss,
-                    "lots": lots,
-                    "investment": investment_amt,
-                    "vol_ratio": round(last_vol / last_vol_avg, 2),
-                })
+                vol_ratio = round(last_vol / last_vol_avg, 2)
+                sl_pct = round(((stop_loss - last_close) / last_close) * 100, 1)
+                tp_pct = round(
+                    ((target_price - last_close) / last_close) * 100, 1
+                )
+
+                # Format Pesan Telegram
+                caption = f"🚀 *SINYAL SWING TRADING: {ticker_clean}*\n"
+                caption += f"-----------------------------------\n"
+                caption += f"• Harga Closing: Rp {last_close:,.0f}\n"
+                caption += f"• RSI (14): *{last_rsi:.1f}* (Aman < 70)\n"
+                caption += f"• Volatilitas (ATR14): Rp {last_atr:,.0f}\n"
+                caption += f"• Lonjakan Volume: {vol_ratio}x rata-rata\n\n"
+                caption += f"🎯 Target Profit (+{tp_pct}%): *Rp {target_price:,.0f}*\n"
+                caption += f"🛡️ Stop Loss ({sl_pct}%): *Rp {stop_loss:,.0f}*\n\n"
+                caption += f"🛒 *Beli: {lots} Lot* (~Rp {investment_amt:,.0f})\n"
+                caption += f"-----------------------------------\n"
+                caption += f"💡 Pasang Automatic Order / GTC sebelum pasar buka besok jam 09.00 WIB."
+
+                # Buat Chart & Kirim ke Telegram
+                image_path = generate_chart(df_clean, ticker)
+                send_telegram_photo(image_path, caption)
+
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+
         except Exception as e:
             print(f"Error processing {ticker}: {e}")
 
-    return signals
+    return signals_count
 
 
 def main():
@@ -133,34 +265,21 @@ def main():
         msg = (
             "⚠️ *IHSG MARKET ALERT*\n"
             "Status Pasar: *BEARISH / SIDEWAYS* (IHSG < MA50).\n\n"
-            "🛡️ *Rekomendasi:* NO TRADE / Hold Cash. Bot tidak menyarankan eksekusi posisi baru hari ini."
+            "🛡️ *Rekomendasi:* NO TRADE / Hold Cash. Bot tidak merekomendasikan posisi baru hari ini."
         )
-        send_telegram(msg)
+        send_telegram_text(msg)
         return
 
     print("Melakukan screening saham...")
-    results = screen_stocks()
+    total_signals = screen_stocks()
 
-    if not results:
-        msg = "📊 *HASIL SCREENING MALAM INI*\nStatus IHSG: *BULLISH*\n\nTidak ada saham di watchlist yang memenuhi syarat teknikal hari ini."
-        send_telegram(msg)
-        return
-
-    msg = "🚀 *REKOMENDASI SWING TRADING IHSG* 🚀\n"
-    msg += "Status Pasar: *BULLISH* (IHSG > MA50)\n"
-    msg += "-----------------------------------\n\n"
-
-    for s in results:
-        msg += f"📌 *Saham: {s['symbol']}*\n"
-        msg += f"• Harga Closing: Rp {s['close']:,.0f}\n"
-        msg += f"• Lonjakan Volume: {s['vol_ratio']}x rata-rata\n"
-        msg += f"• Target Profit (+8%): *Rp {s['target']:,.0f}*\n"
-        msg += f"• Stop Loss (-4%): *Rp {s['sl']:,.0f}*\n"
-        msg += f"• Beli: *{s['lots']} Lot* (~Rp {s['investment']:,.0f})\n"
-        msg += "-----------------------------------\n\n"
-
-    msg += "💡 *Instruksi:* Pasang Automatic Order / GTC Buy di aplikasi sekuritas lo besok pagi sebelum jam 09.00 WIB."
-    send_telegram(msg)
+    if total_signals == 0:
+        msg = (
+            "📊 *HASIL SCREENING MALAM INI*\n"
+            "Status IHSG: *BULLISH*\n\n"
+            "Tidak ada saham di watchlist yang memenuhi kriteria $EMA_{20}/EMA_{50}$ + Volume Spike + RSI < 70 hari ini."
+        )
+        send_telegram_text(msg)
 
 
 if __name__ == "__main__":
