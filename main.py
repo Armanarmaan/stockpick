@@ -162,10 +162,10 @@ def screen_stocks():
             if df.empty or len(df) < 50:
                 continue
 
-            close = (
-                df["Close"][ticker]
+            open_price = (
+                df["Open"][ticker]
                 if isinstance(df.columns, pd.MultiIndex)
-                else df["Close"]
+                else df["Open"]
             )
             high = (
                 df["High"][ticker]
@@ -177,15 +177,25 @@ def screen_stocks():
                 if isinstance(df.columns, pd.MultiIndex)
                 else df["Low"]
             )
+            close = (
+                df["Close"][ticker]
+                if isinstance(df.columns, pd.MultiIndex)
+                else df["Close"]
+            )
             volume = (
                 df["Volume"][ticker]
                 if isinstance(df.columns, pd.MultiIndex)
                 else df["Volume"]
             )
 
-            df_clean = pd.DataFrame(
-                {"High": high, "Low": low, "Close": close, "Volume": volume}
-            )
+            # Reconstruct dataframe lengkap OHLCV untuk mplfinance
+            df_clean = pd.DataFrame({
+                "Open": open_price,
+                "High": high,
+                "Low": low,
+                "Close": close,
+                "Volume": volume,
+            })
 
             # Indicator Calculations
             ema20 = close.ewm(span=20, adjust=False).mean()
@@ -202,10 +212,7 @@ def screen_stocks():
             last_atr = float(atr.iloc[-1])
             last_rsi = float(rsi.iloc[-1])
 
-            # Syarat Technical:
-            # 1. Uptrend (Close > EMA20 > EMA50)
-            # 2. Volume Spike (> Rata-rata 20 Hari)
-            # 3. RSI < 70 (Belum Overbought / Belum Pucuk)
+            # Syarat Technical
             cond_uptrend = (last_close > last_ema20) and (
                 last_ema20 > last_ema50
             )
@@ -277,7 +284,7 @@ def main():
         msg = (
             "📊 *HASIL SCREENING MALAM INI*\n"
             "Status IHSG: *BULLISH*\n\n"
-            "Tidak ada saham di watchlist yang memenuhi kriteria $EMA_{20}/EMA_{50}$ + Volume Spike + RSI < 70 hari ini."
+            "Tidak ada saham di watchlist yang memenuhi kriteria EMA20/EMA50 + Volume Spike + RSI < 70 hari ini."
         )
         send_telegram_text(msg)
 
