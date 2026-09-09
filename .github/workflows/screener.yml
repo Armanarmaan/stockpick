@@ -2,8 +2,8 @@ name: IHSG Daily Screener Bot
 
 on:
   schedule:
-    # Berjalan Senin-Jumat jam 12:00 UTC (Sama dengan jam 19:00 WIB)
-    - cron: '0 12 * * 1-5'
+    # Berjalan Senin-Jumat jam 13:13 UTC (Sama dengan jam 19:00 WIB)
+    - cron: '13 13 * * 1-5'
   workflow_dispatch: # Memungkinkan kamu menjalankan bot secara manual kapan saja dari web GitHub
 
 jobs:
